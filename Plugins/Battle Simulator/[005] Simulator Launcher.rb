@@ -62,12 +62,24 @@ module BattleSimulator
     loop do
       scene  = MenuScene.new(state)
       action = scene.main
-      if action == :quit
+      case action
+      when :quit
         $scene = nil
         return
+      when :edit_team
+        old_name = state.send(scene.edit_key)
+        result = TeamEditor.edit(old_name)
+        if result.is_a?(String) && result != old_name   # Équipe renommée
+          state.player_team = result if state.player_team == old_name
+          state.ai_team     = result if state.ai_team == old_name
+        end
+      when :new_team
+        result = TeamEditor.create
+        state.player_team = result if result.is_a?(String)
+      else
+        outcome = launch_battle(state, scene.prepared)
+        state.last_result = OUTCOME_NAMES[outcome] || outcome.to_s if outcome
       end
-      outcome = launch_battle(state, scene.prepared)
-      state.last_result = OUTCOME_NAMES[outcome] || outcome.to_s if outcome
     end
   end
 

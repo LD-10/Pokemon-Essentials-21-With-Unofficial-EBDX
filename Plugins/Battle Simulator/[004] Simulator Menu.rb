@@ -193,6 +193,8 @@ module BattleSimulator
     attr_reader :state
     # Équipes construites avant de fermer le menu (voir try_start).
     attr_reader :prepared
+    # Ligne d'équipe (:player_team / :ai_team) à modifier pour l'action :edit_team.
+    attr_reader :edit_key
 
     def initialize(state)
       @state    = state
@@ -268,6 +270,7 @@ module BattleSimulator
         rows.push({ :type => :header, :text => _INTL("Aucun gimmick enregistré") })
       end
       rows.push({ :type => :header, :text => _INTL("Outils") })
+      rows.push({ :type => :command, :key => :new_team, :text => _INTL("Créer une équipe") })
       rows.push({ :type => :command, :key => :clear,  :text => _INTL("Tout décocher") })
       rows.push({ :type => :command, :key => :reload, :text => _INTL("Recharger les équipes") })
       rows.push({ :type => :command, :key => :quit,   :text => _INTL("Quitter le jeu") })
@@ -378,7 +381,7 @@ module BattleSimulator
         when :format
           return _INTL("Gauche/Droite : Solo (1 Pokémon de chaque côté) ou Duo (2 contre 2).")
         else
-          return _INTL("Gauche/Droite : choisir une équipe de {1}.", BattleSimulator::TEAMS_FILE) if @team_errors.empty?
+          return _INTL("Gauche/Droite : choisir une équipe. Entrée : la modifier (Pokémon, attaques, objets, talents, EV/IV...).") if @team_errors.empty?
           return _INTL("Erreurs dans {1} :\n{2}", BattleSimulator::TEAMS_FILE, @team_errors.first(2).join("\n"))
         end
       when :action
@@ -388,6 +391,7 @@ module BattleSimulator
         return text
       when :command
         case row[:key]
+        when :new_team then return _INTL("Crée une nouvelle équipe avec l'éditeur.")
         when :clear  then return _INTL("Décoche tous les gimmicks.")
         when :reload then return _INTL("Relit {1} après une modification.", BattleSimulator::TEAMS_FILE)
         when :quit   then return _INTL("Ferme le jeu.")
@@ -510,11 +514,22 @@ module BattleSimulator
         end
         refresh
       when :option
-        change_option(1)
+        if row[:key] == :format
+          change_option(1)
+        elsif team_named(@state.send(row[:key]))
+          pbPlayDecisionSE
+          @edit_key = row[:key]
+          @action = :edit_team
+        else
+          pbPlayBuzzerSE
+        end
       when :action
         try_start
       when :command
         case row[:key]
+        when :new_team
+          pbPlayDecisionSE
+          @action = :new_team
         when :clear
           @state.selected.clear
           pbPlayDecisionSE

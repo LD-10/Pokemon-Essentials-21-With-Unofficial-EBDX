@@ -45,12 +45,18 @@ module BattleSimulator
   class Team
     attr_reader   :name, :sets, :errors
     attr_accessor :format_tag
+    # Lignes (index à partir de 0) occupées par l'équipe dans le fichier, de
+    # son en-tête "=== ... ===" à la dernière ligne de son dernier Pokémon.
+    # Utilisées par l'éditeur pour réécrire seulement cette équipe.
+    attr_accessor :start_line, :end_line
 
     def initialize(name, format_tag = nil)
       @name       = name
       @format_tag = format_tag
       @sets       = []
       @errors     = []   # Erreurs de syntaxe dans les lignes de cette équipe
+      @start_line = nil
+      @end_line   = nil
     end
   end
 
@@ -131,6 +137,8 @@ module BattleSimulator
         next if line.start_with?("#", "//")
         if line =~ /^===\s*(?:\[([^\]]*)\]\s*)?(.*?)\s*===$/
           team = Team.new(($2.empty?) ? _INTL("Équipe {1}", teams.length + 1) : $2, $1)
+          team.start_line = i
+          team.end_line   = i
           teams.push(team)
           current = nil
           next
@@ -138,6 +146,7 @@ module BattleSimulator
         if !current
           if !team
             team = Team.new(_INTL("Équipe {1}", teams.length + 1))
+            team.start_line = i
             teams.push(team)
           end
           current = PokemonSet.new(line_no)
@@ -149,8 +158,10 @@ module BattleSimulator
             team.errors.push(message)
           end
           team.sets.push(current)
+          team.end_line = i
           next
         end
+        team.end_line = i
         begin
           parse_line(current, line)
         rescue TeamError => e

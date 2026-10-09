@@ -17,7 +17,7 @@ module Settings
   # status is doubled if a move is capable of inflicting Frostbite. Pokemon with
   # the Drowsy status are also twice as likely to be unable to act each turn.
   #-----------------------------------------------------------------------------
-  HAIL_WEATHER_TYPE = 1
+  HAIL_WEATHER_TYPE = 2   # Battle Simulator : Grêle + Neige (dégâts + Défense des types Glace)
   
   
   #=============================================================================
