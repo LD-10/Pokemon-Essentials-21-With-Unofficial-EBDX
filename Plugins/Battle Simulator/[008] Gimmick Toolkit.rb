@@ -362,11 +362,13 @@ module BattleModifiers
             ai     = rest[-2]
             battle = rest[-1]
             ret = original.call(score, *rest)
-            if ret.is_a?(Numeric) && ret != Battle::AI::MOVE_USELESS_SCORE &&
-               Settings::MECHANICS_GENERATION >= 8 && Locks.terrain_unremovable?(battle)
-              ret += ai.get_score_for_terrain(battle.field.terrain, rest[1])
+            next ret if !ret.is_a?(Numeric) || !Locks.terrain_unremovable?(battle)
+            if code == "LowerTargetEvasion1RemoveSideEffects"
+              # rest = [move, user, target, ai, battle] : Anti-Brume ne compte le
+              # terrain qu'en Gen 8+ et contre un adversaire.
+              next ret if Settings::MECHANICS_GENERATION < 8 || !rest[2].opposes?(rest[1])
             end
-            next ret
+            next ret + ai.get_score_for_terrain(battle.field.terrain, rest[1])
           end
         end
       end

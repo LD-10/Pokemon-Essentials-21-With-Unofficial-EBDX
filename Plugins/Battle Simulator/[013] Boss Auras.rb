@@ -233,8 +233,12 @@ class Battle
   alias __bsim_ng_pbMessagesOnReplace pbMessagesOnReplace unless method_defined?(:__bsim_ng_pbMessagesOnReplace)
   def pbMessagesOnReplace(idxBattler, idxParty)
     pkmn = pbParty(idxBattler)[idxParty]
+    # Mêmes conditions que activeAbilityShield? du Gen 9 Pack.
+    shield = pkmn && pkmn.hasItem?(:ABILITYSHIELD) &&
+             @field.effects[PBEffects::MagicRoom] == 0 &&
+             !(@corrosiveGas && @corrosiveGas[idxBattler % 2][idxParty])
     @bsim_aura_gas = BattleModifiers.active? && BattleModifiers.enabled?(:aura_neutralizing_gas) &&
-                     !opposes?(idxBattler) && pkmn && !pkmn.hasItem?(:ABILITYSHIELD)
+                     !opposes?(idxBattler) && pkmn && !shield
     begin
       return __bsim_ng_pbMessagesOnReplace(idxBattler, idxParty)
     ensure
@@ -248,6 +252,29 @@ class Battle
       return BattleModifiers::Tools.ai_battlers(self).first || true
     end
     return __bsim_ng_pbCheckGlobalAbility(*args)
+  end
+end
+
+# Un vrai Gaz Inhibiteur de l'IA ne fait rien sous l'aura : l'aura l'a déjà
+# annoncé, et les talents de l'IA (Illusion, Début Calme...) ne doivent pas
+# être touchés.
+BattleModifiers::Locks.install_guard(Battle::AbilityEffects::OnSwitchIn, :NEUTRALIZINGGAS) do |original, ability, battler, battle, switch_in|
+  next if BattleModifiers.active? && BattleModifiers.enabled?(:aura_neutralizing_gas) &&
+          BattleModifiers.ai_battler?(battler)
+  next original.call(ability, battler, battle, switch_in)
+end
+
+class Battle::Battler
+  # Sous l'aura, la fin d'un vrai Gaz Inhibiteur ne change rien (sauf celui
+  # d'un Pokémon du joueur gardé actif par un Bouclier Talent) : pas de
+  # message "wore off" ni de talents d'entrée relancés.
+  alias __bsim_ng_pbAbilitiesOnNeutralizingGasEnding pbAbilitiesOnNeutralizingGasEnding unless method_defined?(:__bsim_ng_pbAbilitiesOnNeutralizingGasEnding)
+  def pbAbilitiesOnNeutralizingGasEnding
+    if BattleModifiers.active? && BattleModifiers.enabled?(:aura_neutralizing_gas) &&
+       (BattleModifiers.ai_battler?(self) || self.item != :ABILITYSHIELD)
+      return
+    end
+    return __bsim_ng_pbAbilitiesOnNeutralizingGasEnding
   end
 end
 
