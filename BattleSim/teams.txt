@@ -1,0 +1,168 @@
+# ==============================================================================
+# Battle Simulator - équipes
+#
+# Format d'export de Pokémon Showdown : copiez-collez vos équipes depuis le
+# teambuilder (bouton "Import/Export"). Une équipe commence par une ligne
+#   === [format] Nom de l'équipe ===
+# et contient jusqu'à 6 Pokémon séparés par une ligne vide.
+#
+# Dans le menu du simulateur, choisissez l'équipe du joueur et celle de l'IA
+# avec Gauche/Droite. Ce fichier est relu à chaque combat (option "Recharger
+# les équipes" dans le menu) : inutile de relancer le jeu après une modification.
+#
+# Valeurs par défaut quand une ligne est absente (comme Showdown) :
+#   Level 100, IV 31, EV 0, bonheur 255, nature neutre, 1er talent de l'espèce.
+# Lignes ignorées : Tera Type, Gigantamax, Dynamax Level, Hidden Power.
+# Lignes en plus : "Form: 2" (numéro de forme Essentials), "Ball: Ultra Ball".
+# Les lignes commençant par # sont des commentaires.
+# ==============================================================================
+
+=== [gen9] Joueur - Équipe standard ===
+
+Garchomp @ Choice Scarf
+Ability: Rough Skin
+Level: 100
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Earthquake
+- Dragon Claw
+- Stone Edge
+- Fire Fang
+
+Rotom-Wash @ Leftovers
+Ability: Levitate
+Level: 100
+EVs: 252 HP / 212 Def / 44 SpD
+Bold Nature
+IVs: 0 Atk
+- Hydro Pump
+- Volt Switch
+- Will-O-Wisp
+- Protect
+
+Ninetales-Alola @ Light Clay
+Ability: Snow Warning
+Level: 100
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+IVs: 0 Atk
+- Blizzard
+- Moonblast
+- Aurora Veil
+- Freeze-Dry
+
+Scizor @ Life Orb
+Ability: Technician
+Level: 100
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Bullet Punch
+- U-turn
+- Swords Dance
+- Knock Off
+
+Gholdengo @ Choice Specs
+Ability: Good as Gold
+Level: 100
+EVs: 252 SpA / 4 SpD / 252 Spe
+Modest Nature
+IVs: 0 Atk
+- Make It Rain
+- Shadow Ball
+- Focus Blast
+- Trick
+
+Amoonguss @ Rocky Helmet
+Ability: Regenerator
+Level: 100
+EVs: 252 HP / 172 Def / 84 SpD
+Relaxed Nature
+IVs: 0 Atk / 0 Spe
+- Spore
+- Giga Drain
+- Sludge Bomb
+- Rage Powder
+
+=== [gen9] IA - Boss ===
+
+Tyranitar @ Choice Band
+Ability: Sand Stream
+Level: 100
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Stone Edge
+- Crunch
+- Earthquake
+- Ice Punch
+
+Excadrill @ Life Orb
+Ability: Sand Rush
+Level: 100
+EVs: 252 Atk / 4 SpD / 252 Spe
+Adamant Nature
+- Earthquake
+- Iron Head
+- Rock Slide
+- Swords Dance
+
+Dragapult @ Choice Specs
+Ability: Infiltrator
+Level: 100
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Draco Meteor
+- Shadow Ball
+- Flamethrower
+- U-turn
+
+Corviknight @ Leftovers
+Ability: Mirror Armor
+Level: 100
+EVs: 252 HP / 168 Def / 88 SpD
+Impish Nature
+- Brave Bird
+- Body Press
+- Roost
+- Defog
+
+Incineroar @ Sitrus Berry
+Ability: Intimidate
+Level: 100
+EVs: 252 HP / 4 Atk / 252 SpD
+Careful Nature
+- Fake Out
+- Flare Blitz
+- Knock Off
+- Parting Shot
+
+Kingambit @ Black Glasses
+Ability: Supreme Overlord
+Level: 100
+EVs: 252 HP / 252 Atk / 4 SpD
+Adamant Nature
+- Kowtow Cleave
+- Sucker Punch
+- Iron Head
+- Swords Dance
+
+=== [gen9] Test rapide (2 Pokémon) ===
+
+Pikachu @ Light Ball
+Ability: Static
+Level: 50
+EVs: 252 SpA / 4 SpD / 252 Spe
+Timid Nature
+- Thunderbolt
+- Volt Tackle
+- Protect
+- Fake Out
+
+Lucario @ Focus Sash
+Ability: Inner Focus
+Level: 50
+EVs: 252 Atk / 4 SpD / 252 Spe
+Jolly Nature
+- Close Combat
+- Extreme Speed
+- Swords Dance
+- Protect

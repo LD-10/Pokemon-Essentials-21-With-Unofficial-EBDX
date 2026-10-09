@@ -1,0 +1,14 @@
+Name       = Battle Simulator
+Version    = 0.1.0
+Essentials = 21.1
+Optional   = v21.1 Hotfixes,1.0
+Optional   = Generation 9 Pack,3.0
+Optional   = Elite Battle: DX,1.0
+Credits    = LD-10
+#====================================================================
+# Simulateur de combats 6v6 (Solo/Duo) avec gimmicks combinables.
+#
+# Les dependances "Optional" ne sont pas obligatoires : elles forcent
+# seulement ce plugin a se charger APRES l'EBDX et le Gen 9 Pack, pour
+# que nos hooks (alias) enveloppent leurs versions des methodes.
+#====================================================================
