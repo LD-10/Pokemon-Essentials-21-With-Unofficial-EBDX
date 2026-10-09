@@ -1,12 +1,13 @@
 #===============================================================================
 # Battle Simulator - menu de préparation du combat.
 #
-# Haut/Bas      : se déplacer (les titres de catégorie sont sautés)
-# Gauche/Droite : changer le format ou l'équipe
-# Entrée (USE)  : cocher/décocher un gimmick, valider une action
-# Z (ACTION)    : lancer le combat depuis n'importe quelle ligne
-# Échap (BACK)  : revenir sur "Lancer le combat"
-# L / R         : catégorie précédente / suivante
+# Les noms de touches sont ceux de la fenêtre des touches (F1) :
+# Haut/Bas          : se déplacer (les titres de catégorie sont sautés)
+# Gauche/Droite     : changer le format ou l'équipe
+# Use               : cocher/décocher un gimmick, valider une action
+# Action            : lancer le combat depuis n'importe quelle ligne
+# Back              : revenir sur "Lancer le combat"
+# JumpUp / JumpDown : catégorie précédente / suivante
 #===============================================================================
 module BattleSimulator
   #=============================================================================
@@ -183,14 +184,18 @@ module BattleSimulator
     INFO_BASE     = Color.new(208, 216, 248)
     INFO_SHADOW   = Color.new(40, 48, 88)
     TOP_HEIGHT    = 44
-    LIST_HEIGHT   = 224
+    LIST_HEIGHT   = 192   # 5 lignes visibles ; la description garde 4 lignes
 
     attr_reader :state
+    # Équipes construites avant de fermer le menu (voir try_start).
+    attr_reader :prepared
 
     def initialize(state)
-      @state  = state
-      @action = nil
-      @teams  = []
+      @state    = state
+      @action   = nil
+      @prepared = nil
+      @notice   = nil
+      @teams    = []
       @team_errors = []
     end
 
@@ -214,7 +219,11 @@ module BattleSimulator
     #---------------------------------------------------------------------------
     def reload_teams
       TeamLoader.clear_indexes
-      @teams, @team_errors = TeamLoader.load_file
+      begin
+        @teams, @team_errors = TeamLoader.load_file
+      rescue StandardError => e
+        @teams, @team_errors = [], [e.message]
+      end
       names = @teams.map { |t| t.name }
       @state.player_team = names[0] if !names.include?(@state.player_team)
       @state.ai_team = names[1] || names[0] if !names.include?(@state.ai_team)
@@ -281,13 +290,17 @@ module BattleSimulator
       draw_background(@sprites["bg"].bitmap)
       @sprites["top"] = BitmapSprite.new(Graphics.width, TOP_HEIGHT, @viewport)
       @sprites["list"] = Window_SimulatorMenu.new(self, 0, TOP_HEIGHT, Graphics.width, LIST_HEIGHT, @viewport)
-      @sprites["list"].active = false
+      # Fenêtre active (pour ses flèches de défilement) mais les touches sont
+      # gérées par la scène, qui saute les titres de catégorie.
+      @sprites["list"].active = true
+      @sprites["list"].ignore_input = true
       @sprites["list"].rows = build_rows
       desc_y = TOP_HEIGHT + LIST_HEIGHT
       @sprites["desc"] = Window_AdvancedTextPokemon.newWithSize(
         "", 0, desc_y, Graphics.width, Graphics.height - desc_y, @viewport
       )
       @sprites["list"].index = @sprites["list"].rows.index { |row| row[:key] == :start } || 0
+      @sprites["list"].top_row = 0   # Garder "Format" visible à l'ouverture
       refresh
       play_menu_bgm
       pbFadeInAndShow(@sprites) { pbUpdateSpriteHash(@sprites) }
@@ -333,7 +346,9 @@ module BattleSimulator
       pbSetSmallFont(bitmap)
       count = @state.effective_modifiers.length
       line1 = _INTL("{1} | {2} gimmick(s) actif(s)", option_value(:format), count)
-      line2 = (@state.last_result) ? _INTL("Dernier combat : {1}", @state.last_result) : ""
+      line2 = ""
+      line2 = _INTL("Dernier combat : {1}", @state.last_result) if @state.last_result
+      line2 = @notice if @notice
       pbDrawTextPositions(bitmap, [
         [line1, Graphics.width - 12, 4, :right, INFO_BASE, INFO_SHADOW],
         [line2, Graphics.width - 12, 22, :right, INFO_BASE, INFO_SHADOW]
@@ -387,13 +402,12 @@ module BattleSimulator
         change_option(-1)
       elsif Input.repeat?(Input::RIGHT)
         change_option(1)
-      elsif Input.trigger?(Input::JUMPUP)
+      elsif Input.trigger?(Input::JUMPUP) || Input.trigger?(Input::AUX1)
         jump_category(-1)
-      elsif Input.trigger?(Input::JUMPDOWN)
+      elsif Input.trigger?(Input::JUMPDOWN) || Input.trigger?(Input::AUX2)
         jump_category(1)
       elsif Input.trigger?(Input::ACTION)
-        pbPlayDecisionSE
-        @action = :start
+        try_start
       elsif Input.trigger?(Input::BACK)
         start_index = @sprites["list"].rows.index { |row| row[:key] == :start }
         if start_index && @sprites["list"].index != start_index
@@ -406,6 +420,8 @@ module BattleSimulator
     end
 
     def set_index(index)
+      @notice = nil
+      refresh_top
       @sprites["list"].index = index
       @sprites["list"].refresh
       @sprites["desc"].text = description_text
@@ -460,6 +476,20 @@ module BattleSimulator
       refresh
     end
 
+    # Construit les équipes avant de fermer le menu : en cas d'erreur, le
+    # message s'affiche par-dessus le menu et on y reste.
+    def try_start
+      prepared, errors = BattleSimulator.prepare_battle(@state)
+      if !prepared
+        pbPlayBuzzerSE
+        pbMessage(_INTL("Impossible de lancer le combat :\n{1}", errors.join("\n")))
+        return
+      end
+      pbPlayDecisionSE
+      @prepared = prepared
+      @action = :start
+    end
+
     def activate_row
       row = current_row
       return if !row
@@ -467,16 +497,15 @@ module BattleSimulator
       when :modifier
         removed = @state.toggle(row[:modifier].id)
         pbPlayDecisionSE
-        refresh
         if !removed.empty?
           names = removed.map { |id| BattleModifiers.get(id).name }
-          @sprites["desc"].text = description_text + "\n" + _INTL("Décoché : {1}", names.join(", "))
+          @notice = _INTL("Décoché : {1}", names.join(", "))
         end
+        refresh
       when :option
         change_option(1)
       when :action
-        pbPlayDecisionSE
-        @action = :start
+        try_start
       when :command
         case row[:key]
         when :clear

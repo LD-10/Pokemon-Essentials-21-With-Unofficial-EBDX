@@ -43,13 +43,14 @@ module BattleSimulator
   end
 
   class Team
-    attr_reader   :name, :sets
+    attr_reader   :name, :sets, :errors
     attr_accessor :format_tag
 
     def initialize(name, format_tag = nil)
       @name       = name
       @format_tag = format_tag
       @sets       = []
+      @errors     = []   # Erreurs de syntaxe dans les lignes de cette équipe
     end
   end
 
@@ -72,14 +73,40 @@ module BattleSimulator
     # les autres équipes.
     def load_file(path = BattleSimulator::TEAMS_FILE)
       return [[], [_INTL("Fichier d'équipes introuvable : {1}", path)]] if !File.exist?(path)
-      text = File.open(path, "rb") { |f| f.read }
-      return parse(text)
+      begin
+        text = File.open(path, "rb") { |f| f.read }
+        return parse(text)
+      rescue StandardError => e
+        return [[], [_INTL("Lecture de {1} impossible : {2}", path, e.message)]]
+      end
+    end
+
+    # Le fichier peut avoir été enregistré en UTF-8 (avec ou sans BOM), en
+    # UTF-16 ("Unicode" du Bloc-notes) ou en ANSI/Windows-1252.
+    def decode_text(data)
+      raw = data.dup.force_encoding(Encoding::BINARY)
+      utf16 = { [0xFF, 0xFE].pack("C*") => Encoding::UTF_16LE,
+                [0xFE, 0xFF].pack("C*") => Encoding::UTF_16BE }
+      utf16.each do |bom, encoding|
+        next if !raw.start_with?(bom)
+        begin
+          return raw[2..-1].force_encoding(encoding).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+        rescue StandardError
+          break
+        end
+      end
+      text = raw.dup.force_encoding(Encoding::UTF_8)
+      text = text[1..-1] if text.start_with?([0xFEFF].pack("U"))   # BOM UTF-8
+      return text if text.valid_encoding?
+      begin
+        return raw.dup.force_encoding(Encoding::Windows_1252).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+      rescue StandardError
+        return text.scrub("?")
+      end
     end
 
     def parse(text)
-      text = text.dup.force_encoding(Encoding::UTF_8)
-      bom = [0xFEFF].pack("U")
-      text = text[1..-1] if text.start_with?(bom)
+      text = decode_text(text)
       teams   = []
       errors  = []
       team    = nil
@@ -107,7 +134,9 @@ module BattleSimulator
           begin
             parse_header(current, line)
           rescue TeamError => e
-            errors.push(_INTL("Ligne {1} : {2}", line_no, e.message))
+            message = _INTL("{1}, ligne {2} : {3}", team.name, line_no, e.message)
+            errors.push(message)
+            team.errors.push(message)
           end
           team.sets.push(current)
           next
@@ -115,7 +144,9 @@ module BattleSimulator
         begin
           parse_line(current, line)
         rescue TeamError => e
-          errors.push(_INTL("Ligne {1} : {2}", line_no, e.message))
+          message = _INTL("{1}, ligne {2} : {3}", team.name, line_no, e.message)
+          errors.push(message)
+          team.errors.push(message)
         end
       end
       teams.reject! { |t| t.sets.empty? }

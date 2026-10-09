@@ -361,21 +361,27 @@ module BattleModifiers
 
     module_function
 
+    # Après un F12 (reset), mkxp-z réexécute tous les scripts : les méthodes
+    # trigger* du jeu de base sont redéfinies par-dessus nos versions. On ne se
+    # fie donc pas à l'existence de l'alias mais à la méthode actuellement en
+    # place, et le HandlerHash est relu à chaque appel (il est recréé aussi).
     def install
-      effects = Battle::AbilityEffects
+      effects  = Battle::AbilityEffects
+      wrappers = effects.instance_variable_get(:@__bmod_wrappers) || {}
       SPECS.each do |name, spec|
         trigger_method = "trigger#{name}".to_sym
         next if !effects.const_defined?(name) || !effects.respond_to?(trigger_method)
+        next if wrappers[trigger_method] && effects.method(trigger_method) == wrappers[trigger_method]
         original = "__bmod_#{trigger_method}".to_sym
-        next if effects.respond_to?(original)
-        hash = effects.const_get(name)
         effects.singleton_class.send(:alias_method, original, trigger_method)
         effects.define_singleton_method(trigger_method) do |ability, *args|
           ret = effects.send(original, ability, *args)
           next ret if !BattleModifiers.handles?(:extra_abilities)
-          next AbilityMultiplexer.run_extras(hash, spec, ability, args, ret)
+          next AbilityMultiplexer.run_extras(effects.const_get(name), spec, ability, args, ret)
         end
+        wrappers[trigger_method] = effects.method(trigger_method)
       end
+      effects.instance_variable_set(:@__bmod_wrappers, wrappers)
     end
 
     # Pokémon qui porte le talent "ability" pour cet appel, ou nil.

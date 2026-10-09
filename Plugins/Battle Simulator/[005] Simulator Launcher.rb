@@ -33,11 +33,13 @@ module BattleSimulator
     return @in_battle
   end
 
-  # Ouvrir le simulateur au démarrage ? (CTRL maintenu = jeu normal)
+  # Ouvrir le simulateur au démarrage ? Maintenir NORMAL_GAME_KEY pendant le
+  # démarrage lance le jeu normal (CTRL et SHIFT ne servent pas : Essentials
+  # les lit déjà au démarrage pour forcer la recompilation en mode Debug).
   def boot_into_simulator?
     return false if !BattleSimulator::ENABLED
     Input.update
-    return !Input.press?(Input::CTRL)
+    return !Input.press?(BattleSimulator::NORMAL_GAME_KEY)
   end
 
   # Équivalent silencieux de "Nouvelle partie".
@@ -48,6 +50,9 @@ module BattleSimulator
     if BattleSimulator::ALLOW_MEGA_EVOLUTION && GameData::Item.exists?(:MEGARING)
       $bag.add(:MEGARING)
     end
+    # La carte de départ (noire) reste derrière le menu et les combats : on
+    # cache le sprite du joueur pour qu'il n'apparaisse pas entre deux écrans.
+    $game_player.transparent = true
     $game_temp.bsim_open_menu = true
   end
 
@@ -55,12 +60,13 @@ module BattleSimulator
   def main_loop
     state = MenuState.load
     loop do
-      action = MenuScene.new(state).main
+      scene  = MenuScene.new(state)
+      action = scene.main
       if action == :quit
         $scene = nil
         return
       end
-      outcome = launch_battle(state)
+      outcome = launch_battle(state, scene.prepared)
       state.last_result = OUTCOME_NAMES[outcome] || outcome.to_s if outcome
     end
   end
@@ -68,37 +74,47 @@ module BattleSimulator
   #=============================================================================
   # Combat
   #=============================================================================
-  # Construit les équipes, lance le combat et renvoie son résultat (nil si le
-  # combat n'a pas pu être lancé).
-  def launch_battle(state)
-    teams, errors = TeamLoader.load_file
+  # Lit les équipes et crée les Pokémon. Renvoie [données, nil] ou
+  # [nil, erreurs]. Le menu l'appelle avant de se fermer, pour que les erreurs
+  # d'équipe s'affichent par-dessus le menu.
+  def prepare_battle(state)
+    teams, = TeamLoader.load_file
     player_team = teams.find { |t| t.name == state.player_team }
     ai_team     = teams.find { |t| t.name == state.ai_team }
+    errors = []
     errors.push(_INTL("Équipe du joueur introuvable.")) if !player_team
     errors.push(_INTL("Équipe de l'IA introuvable.")) if !ai_team
-    return show_errors(errors) if !player_team || !ai_team
-    # Création des Pokémon
+    [player_team, ai_team].uniq.compact.each { |team| errors.concat(team.errors) }
+    return nil, errors if !errors.empty?
     ai_trainer = create_ai_trainer
     begin
       player_party = TeamLoader.build_party(player_team, $player)
       ai_party     = TeamLoader.build_party(ai_team, ai_trainer)
     rescue TeamError => e
-      return show_errors([e.message])
+      return nil, [e.message]
     end
     minimum = (state.format == :double) ? 2 : 1
     if player_party.length < minimum || ai_party.length < minimum
-      return show_errors([_INTL("Le format Duo demande au moins 2 Pokémon dans chaque équipe.")])
+      return nil, [_INTL("Le format Duo demande au moins 2 Pokémon dans chaque équipe.")]
     end
     ai_trainer.party = ai_party
-    # Combat
+    return { :player_party => player_party, :ai_trainer => ai_trainer }, nil
+  end
+
+  # Lance le combat et renvoie son résultat (nil s'il n'a pas pu être lancé).
+  def launch_battle(state, prepared = nil)
+    if !prepared
+      prepared, errors = prepare_battle(state)
+      return show_errors(errors) if !prepared
+    end
     old_party = $player.party
     outcome = nil
     begin
-      $player.party = player_party
+      $player.party = prepared[:player_party]
       BattleModifiers.start_session(state.selected, state.format)
       @in_battle = true
       set_battle_rules(state)
-      outcome = TrainerBattle.start_core(ai_trainer)
+      outcome = TrainerBattle.start_core(prepared[:ai_trainer])
     ensure
       @in_battle = false
       BattleModifiers.end_session

@@ -3,9 +3,13 @@
 #===============================================================================
 module BattleSimulator
   # Si true, le jeu saute l'écran titre et l'aventure et ouvre directement le
-  # menu du simulateur. Maintenir CTRL pendant le démarrage lance le jeu normal
-  # (pratique pour accéder aux outils de debug d'Essentials).
+  # menu du simulateur.
   ENABLED = true
+  # Touche à maintenir pendant le démarrage pour lancer le jeu normal (écran
+  # titre, aventure, outils de debug). Input::SPECIAL = la touche "Special" de
+  # la fenêtre des touches (F1). Pas CTRL ni SHIFT : en mode Debug, Essentials
+  # les utilise au démarrage pour forcer la recompilation.
+  NORMAL_GAME_KEY = Input::SPECIAL
 
   # Fichier des équipes, au format d'export de Pokémon Showdown, relatif au
   # dossier du jeu. Il est relu à chaque combat : pas besoin de recompiler.
