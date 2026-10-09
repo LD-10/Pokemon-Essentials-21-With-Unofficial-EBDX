@@ -41,7 +41,15 @@ module BattleSimulator
   # titre définie dans RPG Maker.
   MENU_BGM = nil
 
-  # Affiche les gimmicks de démonstration de l'étape 1 (tests du moteur). À
-  # passer à false quand les vrais gimmicks seront en place.
-  SHOW_DEMO_MODIFIERS = true
+  # Étape 2 (effets classiques permanents) :
+  #   true  -> une attaque ou un talent peut remplacer la météo/le terrain
+  #            (5 tours) ou retirer le terrain et les protections de l'IA
+  #            (Anti-Brume, Casse-Brique...) ; l'effet revient ensuite tout
+  #            seul (fin de l'autre météo/terrain, ou fin du tour).
+  #   false -> impossible de les retirer ou de les remplacer, comme les
+  #            T-Terrains et les Vicious Weathers.
+  CLASSIC_EFFECTS_REMOVABLE = true
+
+  # Affiche les gimmicks de démonstration de l'étape 1 (tests du moteur).
+  SHOW_DEMO_MODIFIERS = false
 end

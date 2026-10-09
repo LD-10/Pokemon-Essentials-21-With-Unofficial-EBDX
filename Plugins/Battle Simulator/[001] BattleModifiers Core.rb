@@ -59,18 +59,28 @@ module BattleModifiers
     :eor_weather_damage   => [:override, "battle, battler"],
     # Soin du Champ Herbu de fin de tour d'un Pokémon. true = géré.
     :eor_terrain_healing  => [:override, "battle, battler"],
+    # Après un vrai changement de météo par Battle#pbStartWeather.
+    :on_weather_change    => [:trigger,  "battle, old_weather, new_weather"],
     #--- Battler ------------------------------------------------------------
     # Talents "virtuels" ajoutés au talent normal (hasActiveAbility? + handlers
     # de Battle::AbilityEffects). Renvoyer un tableau d'IDs de talents.
+    # (Pour des talents fixes côté IA, l'option ai_abilities: de register est
+    # plus simple et plus rapide.)
     :extra_abilities      => [:collect,  "battler"],
+    # Battler#abilityActive? : renvoyer false neutralise le talent (réel et
+    # virtuels) de ce Pokémon. Ne jamais appeler hasActiveAbility? ni
+    # abilityActive? sur ce battler dans le handler (récursion infinie).
+    :ability_active       => [:allow,    "battler, check_ability"],
     :speed                => [:modify,   "speed, battler"],
     # show_messages est false quand l'IA ne fait qu'une prédiction.
     :can_inflict_status   => [:allow,    "battler, status, user, move, show_messages"],
     :can_lower_stat       => [:allow,    "battler, stat, user, move, show_messages"],
     #--- Attaques -----------------------------------------------------------
     :move_priority        => [:modify,   "priority, user, move"],
-    # true = l'attaque échoue complètement (afficher le message dans le handler).
-    :move_fails           => [:any,      "user, move, targets"],
+    # true = l'attaque échoue complètement. Afficher le message dans le handler
+    # seulement si show_message est vrai : l'IA appelle aussi cet événement
+    # (show_message = false) pour savoir qu'une attaque va échouer.
+    :move_fails           => [:any,      "user, move, targets, show_message"],
     # true = l'attaque échoue contre cette cible.
     :move_fails_against   => [:any,      "user, target, move, show_message"],
     # Efficacité (Effectiveness::NORMAL_EFFECTIVE_MULTIPLIER = neutre, 0 = immunité).
@@ -83,8 +93,25 @@ module BattleModifiers
     #               :accuracy_multiplier, :evasion_multiplier }
     :accuracy_modifiers   => [:trigger,  "user, target, move, modifiers"],
     # Crans de coup critique ajoutés (comme Puissance / Cri Draconique).
-    :critical_stage_bonus => [:modify,   "bonus, user, target, move"]
+    :critical_stage_bonus => [:modify,   "bonus, user, target, move"],
+    # Après Battle::Move#pbCheckDamageAbsorption (Clone, Fantômasque, Tête de
+    # Gel) : le handler peut régler target.damageState pour que le coup soit
+    # absorbé.
+    :damage_absorption    => [:trigger,  "user, target, move"],
+    # Avant Battle::Move#pbEndureKOMessage (messages Fantômasque, Fermeté,
+    # Ténacité...). true = message géré, celui du jeu n'est pas affiché.
+    :endure_ko_message    => [:override, "move, target"],
+    #--- IA -----------------------------------------------------------------
+    # Estimation par l'IA des dégâts/soins de fin de tour d'un Pokémon (PV
+    # perdus, négatif = soin). Les handlers de :damage_multipliers et
+    # :move_fails sont déjà pris en compte automatiquement par l'IA.
+    :ai_eor_damage        => [:modify,   "damage, battler"]
   }
+
+  # Durée donnée aux effets de terrain/côté rendus permanents (Distorsion,
+  # Protection...). Le compte à rebours de fin de tour est bloqué pour eux,
+  # et l'IA lit simplement un effet "qui dure longtemps".
+  LOCK = 999
 
   # Catégories, dans l'ordre d'affichage du menu.
   CATEGORIES = [
@@ -94,7 +121,12 @@ module BattleModifiers
     [:ai_side,   _INTL("Protections côté IA")],
     [:t_terrain, _INTL("T-Terrains")],
     [:vicious,   _INTL("Vicious Weathers")],
-    [:boss_aura, _INTL("Boss Auras")],
+    [:aura_reduce,  _INTL("Boss Auras : réduction des dégâts")],
+    [:aura_immune,  _INTL("Boss Auras : immunités et absorption")],
+    [:aura_bypass,  _INTL("Boss Auras : contournement")],
+    [:aura_protect, _INTL("Boss Auras : protection")],
+    [:aura_boost,   _INTL("Boss Auras : boosts automatiques")],
+    [:aura_special, _INTL("Boss Auras : spéciales")],
     [:duo_boost, _INTL("Boosts Duo")],
     [:misc,      _INTL("Divers")],
     [:demo,      _INTL("Démo (étape 1)")]
@@ -113,7 +145,7 @@ module BattleModifiers
   #=============================================================================
   class Modifier
     attr_reader :id, :name, :description, :category, :scope, :formats
-    attr_reader :exclusive, :conflicts, :order, :handlers
+    attr_reader :exclusive, :conflicts, :order, :handlers, :ai_abilities
 
     def initialize(id, options)
       @id          = id
@@ -130,6 +162,8 @@ module BattleModifiers
       @conflicts   = options[:conflicts] || []
       # Ordre d'exécution des handlers et d'affichage (plus petit = premier).
       @order       = options[:order] || 0
+      # Talents virtuels donnés à tous les Pokémon de l'IA (Boss Auras).
+      @ai_abilities = Array(options[:ai_abilities]).freeze
       @handlers    = {}
     end
 
@@ -181,6 +215,23 @@ module BattleModifiers
 
     def include?(id)
       return @modifiers.any? { |mod| mod.id == id }
+    end
+
+    # Talents virtuels fixes d'un côté (option ai_abilities: des gimmicks).
+    def static_abilities(side)
+      if !@static_abilities
+        ai = @modifiers.map { |mod| mod.ai_abilities }.flatten.uniq
+        @static_abilities = { 0 => [].freeze, 1 => ai.freeze }
+      end
+      return @static_abilities[side] || []
+    end
+
+    # Au moins un gimmick donne des talents virtuels ?
+    def extra_abilities?
+      if @extra_abilities.nil?
+        @extra_abilities = !static_abilities(1).empty? || !handlers(:extra_abilities).empty?
+      end
+      return @extra_abilities
     end
   end
 
@@ -383,10 +434,17 @@ module BattleModifiers
     return battle&.sides[0]
   end
 
-  # Talents virtuels d'un battler (sans son talent "réel" actuel).
+  # Un gimmick actif donne-t-il des talents virtuels ?
+  def extra_abilities?
+    return active? && @session.extra_abilities?
+  end
+
+  # Talents virtuels d'un battler (renvoie toujours un nouveau tableau).
   def extra_abilities_for(battler)
-    return [] if !handles?(:extra_abilities)
-    ret = collect(:extra_abilities, battler)
+    return [] if !extra_abilities?
+    ret = @session.static_abilities(battler.idxOwnSide).dup
+    return ret if @session.handlers(:extra_abilities).empty?
+    ret.concat(collect(:extra_abilities, battler))
     ret.map! { |abil| (abil.is_a?(Symbol)) ? abil : GameData::Ability.try_get(abil)&.id }
     ret.compact!
     ret.uniq!

@@ -34,13 +34,16 @@ class Battle
   alias __bmod_pbOnBattlerEnteringBattle pbOnBattlerEnteringBattle unless method_defined?(:__bmod_pbOnBattlerEnteringBattle)
   def pbOnBattlerEnteringBattle(battler_index, skip_event_reset = false)
     indices = [battler_index].flatten
+    active = BattleModifiers.active?
+    indices.each { |i| @battlers[i]&.bmod_clear_shown_ability } if active
     ret = __bmod_pbOnBattlerEnteringBattle(battler_index, skip_event_reset)
-    if BattleModifiers.active?
+    if active
       entered = indices.map { |i| @battlers[i] }.compact.reject { |b| b.fainted? }
       entered.sort_by { |b| -b.pbSpeed }.each do |b|
         next if b.fainted?
         BattleModifiers.trigger(:on_battler_enter, self, b)
       end
+      BattleModifiers::Locks.reconcile(self, :enter)
     end
     return ret
   end
@@ -49,7 +52,10 @@ class Battle
   def pbEndOfRoundPhase
     BattleModifiers.trigger(:before_end_of_round, self)
     ret = __bmod_pbEndOfRoundPhase
-    BattleModifiers.trigger(:on_end_of_round, self) if @decision == 0
+    if @decision == 0 && BattleModifiers.active?
+      BattleModifiers.trigger(:on_end_of_round, self)
+      BattleModifiers::Locks.reconcile(self, :round)
+    end
     return ret
   end
 
@@ -64,29 +70,62 @@ class Battle
   def pbWeather
     ret = __bmod_pbWeather
     return ret if !BattleModifiers.active?
+    ret = BattleModifiers::Locks.effective_weather(self, ret)
     return BattleModifiers.modify(:effective_weather, ret, self)
   end
 
   alias __bmod_pbStartWeather pbStartWeather unless method_defined?(:__bmod_pbStartWeather)
   def pbStartWeather(user, newWeather, fixedDuration = false, showAnim = true)
-    if @field.weather != newWeather &&
-       !BattleModifiers.allow?(:can_change_weather, self, user, newWeather)
-      # pbStartWeatherAbility affiche la bulle de talent avant d'appeler cette
-      # méthode, qui est censée la cacher.
-      pbHideAbilitySplash(user) if user
-      return
+    if !BattleModifiers.active?
+      return __bmod_pbStartWeather(user, newWeather, fixedDuration, showAnim)
     end
-    return __bmod_pbStartWeather(user, newWeather, fixedDuration, showAnim)
+    old_weather = @field.weather
+    if old_weather != newWeather
+      allowed = BattleModifiers::Locks.weather_change_allowed?(newWeather)
+      # Talent (Crachin...) : on explique pourquoi la météo ne change pas.
+      BattleModifiers::Locks.show_block_message(self, :weather) if !allowed && user
+      allowed &&= BattleModifiers.allow?(:can_change_weather, self, user, newWeather)
+      if !allowed
+        # pbStartWeatherAbility affiche la bulle de talent avant d'appeler
+        # cette méthode, qui est censée la cacher.
+        pbHideAbilitySplash(user) if user
+        return
+      end
+    end
+    ret = __bmod_pbStartWeather(user, newWeather, fixedDuration, showAnim)
+    if @field.weather != old_weather
+      BattleModifiers.trigger(:on_weather_change, self, old_weather, @field.weather)
+    end
+    return ret
   end
 
   alias __bmod_pbStartTerrain pbStartTerrain unless method_defined?(:__bmod_pbStartTerrain)
   def pbStartTerrain(user, newTerrain, fixedDuration = true)
-    if @field.terrain != newTerrain &&
-       !BattleModifiers.allow?(:can_change_terrain, self, user, newTerrain)
-      pbHideAbilitySplash(user) if user
-      return
+    if BattleModifiers.active? && @field.terrain != newTerrain
+      allowed = BattleModifiers::Locks.terrain_change_allowed?(newTerrain)
+      BattleModifiers::Locks.show_block_message(self, :terrain) if !allowed && user
+      allowed &&= BattleModifiers.allow?(:can_change_terrain, self, user, newTerrain)
+      if !allowed
+        pbHideAbilitySplash(user) if user
+        return
+      end
     end
     return __bmod_pbStartTerrain(user, newTerrain, fixedDuration)
+  end
+
+  # Les effets rendus permanents (BattleModifiers::Locks) ne décomptent pas.
+  alias __bmod_pbEORCountDownSideEffect pbEORCountDownSideEffect unless method_defined?(:__bmod_pbEORCountDownSideEffect)
+  def pbEORCountDownSideEffect(side, effect, msg)
+    return if BattleModifiers.active? && @sides[side].effects[effect] > 0 &&
+              BattleModifiers::Locks.side_locked?(side, effect)
+    return __bmod_pbEORCountDownSideEffect(side, effect, msg)
+  end
+
+  alias __bmod_pbEORCountDownFieldEffect pbEORCountDownFieldEffect unless method_defined?(:__bmod_pbEORCountDownFieldEffect)
+  def pbEORCountDownFieldEffect(effect, msg)
+    return if BattleModifiers.active? && @field.effects[effect] > 0 &&
+              BattleModifiers::Locks.field_locked?(effect)
+    return __bmod_pbEORCountDownFieldEffect(effect, msg)
   end
 
   alias __bmod_pbEORWeatherDamage pbEORWeatherDamage unless method_defined?(:__bmod_pbEORWeatherDamage)
@@ -102,13 +141,15 @@ class Battle
   end
 
   # Quand un talent virtuel vient d'être reconnu par hasActiveAbility?, la bulle
-  # de talent affiche son nom au lieu de celui du talent réel.
+  # de talent affiche son nom au lieu de celui du talent réel. La valeur est
+  # consommée par l'affichage.
   alias __bmod_pbShowAbilitySplash pbShowAbilitySplash unless method_defined?(:__bmod_pbShowAbilitySplash)
   def pbShowAbilitySplash(battler, *args)
     shown = (battler && BattleModifiers.active?) ? battler.bmod_shown_ability : nil
     if !shown || shown == battler.ability_id
       return __bmod_pbShowAbilitySplash(battler, *args)
     end
+    battler.bmod_clear_shown_ability
     return battler.bmod_with_ability(shown) { __bmod_pbShowAbilitySplash(battler, *args) }
   end
 end
@@ -135,12 +176,14 @@ class Battle::Battler
   def bmod_with_ability(ability_id)
     old_ability = @ability_id
     old_real    = @bmod_real_ability
+    old_shown   = @bmod_shown_ability
     @bmod_real_ability ||= old_ability
     @bmod_shown_ability = nil
     @ability_id = ability_id
     begin
       return yield
     ensure
+      @bmod_shown_ability = old_shown
       if @ability_id == ability_id
         @ability_id        = old_ability
         @bmod_real_ability = old_real
@@ -155,13 +198,26 @@ class Battle::Battler
     @bmod_shown_ability = nil
   end
 
+  # La prochaine bulle de talent de ce Pokémon affichera ce talent virtuel.
+  def bmod_show_ability(ability_id)
+    @bmod_shown_ability = ability_id
+  end
+
+  # Neutralisation (ex. Gaz Inhibiteur de l'IA) : après le test d'origine.
+  alias __bmod_abilityActive? abilityActive? unless method_defined?(:__bmod_abilityActive?)
+  def abilityActive?(ignore_fainted = false, check_ability = nil)
+    ret = __bmod_abilityActive?(ignore_fainted, check_ability)
+    return ret if !ret || !BattleModifiers.handles?(:ability_active)
+    return BattleModifiers.allow?(:ability_active, self, check_ability)
+  end
+
   alias __bmod_hasActiveAbility? hasActiveAbility? unless method_defined?(:__bmod_hasActiveAbility?)
   def hasActiveAbility?(check_ability, ignore_fainted = false)
     if __bmod_hasActiveAbility?(check_ability, ignore_fainted)
       @bmod_shown_ability = nil if @bmod_shown_ability
       return true
     end
-    return false if !BattleModifiers.active?
+    return false if !BattleModifiers.extra_abilities?
     extras = bmod_extra_abilities
     return false if extras.empty?
     return false if !abilityActive?(ignore_fainted, check_ability)
@@ -200,8 +256,14 @@ class Battle::Battler
 
   alias __bmod_pbUseMove pbUseMove unless method_defined?(:__bmod_pbUseMove)
   def pbUseMove(choice, specialUsage = false)
+    return __bmod_pbUseMove(choice, specialUsage) if !BattleModifiers.active?
+    # Oublie les noms de talents virtuels retenus pendant les calculs de l'IA.
+    @battle.allBattlers.each { |b| b.bmod_clear_shown_ability }
     ret = __bmod_pbUseMove(choice, specialUsage)
-    BattleModifiers.trigger(:after_move_used, @battle, self, choice[2]) if BattleModifiers.active?
+    if BattleModifiers.active?
+      BattleModifiers.trigger(:after_move_used, @battle, self, choice[2])
+      BattleModifiers::Locks.reconcile(@battle, :move)
+    end
     return ret
   end
 end
@@ -225,7 +287,9 @@ module BattleModifiers
 
     def pbMoveFailed?(user, targets)
       return true if super
-      return BattleModifiers.any?(:move_fails, user, self, targets)
+      return false if !BattleModifiers.active?
+      return true if BattleModifiers::Locks.move_blocked?(@battle, self, true)
+      return BattleModifiers.any?(:move_fails, user, self, targets, true)
     end
 
     def pbFailsAgainstTarget?(user, target, show_message)
@@ -255,6 +319,47 @@ module BattleModifiers
       ret = super
       BattleModifiers.trigger(:accuracy_modifiers, user, target, self, modifiers)
       return ret
+    end
+
+    def pbCheckDamageAbsorption(user, target)
+      ret = super
+      BattleModifiers.trigger(:damage_absorption, user, target, self) if BattleModifiers.active?
+      return ret
+    end
+
+    def pbEndureKOMessage(target)
+      return super(target) if !BattleModifiers.active?
+      return if BattleModifiers.override(:endure_ko_message, self, target)
+      # Fermeté virtuelle : la bulle doit afficher "Fermeté", pas le vrai talent.
+      if target.damageState.sturdy && target.ability_id != :STURDY &&
+         target.bmod_extra_abilities.include?(:STURDY)
+        return target.bmod_with_ability(:STURDY) { super(target) }
+      end
+      return super(target)
+    end
+
+    # Attaques qui retirent écrans/terrain (Anti-Brume, Casse-Brique, Lames
+    # Ferraille...) : les effets permanents stricts sont masqués pendant leur
+    # effet, elles ne les voient donc pas.
+    def pbEffectGeneral(*args)
+      return super(*args) if !bmod_masks_removal?
+      return BattleModifiers::Locks.hide_protected(@battle) { super(*args) }
+    end
+
+    def pbEffectAgainstTarget(*args)
+      return super(*args) if !bmod_masks_removal?
+      return BattleModifiers::Locks.hide_protected(@battle) { super(*args) }
+    end
+
+    def pbShowAnimation(*args)
+      return super(*args) if !bmod_masks_removal?
+      return BattleModifiers::Locks.hide_protected(@battle) { super(*args) }
+    end
+
+    def bmod_masks_removal?
+      return false if !BattleModifiers.active? || !BattleModifiers::Locks.any_strict_removable?
+      @bmod_remover = BattleModifiers::Locks.remover?(self) if @bmod_remover.nil?
+      return @bmod_remover
     end
 
     # Les crans de critique en plus passent par l'effet Puissance (FocusEnergy),
@@ -375,9 +480,14 @@ module BattleModifiers
         original = "__bmod_#{trigger_method}".to_sym
         effects.singleton_class.send(:alias_method, original, trigger_method)
         effects.define_singleton_method(trigger_method) do |ability, *args|
+          next effects.send(original, ability, *args) if !BattleModifiers.extra_abilities?
+          # Porteur cherché avant l'appel (le handler peut changer le talent), et
+          # nom de bulle oublié pour qu'il ne s'affiche pas sur le vrai talent.
+          owner = AbilityMultiplexer.owner_of(spec[0], ability, args)
+          owner&.bmod_clear_shown_ability
           ret = effects.send(original, ability, *args)
-          next ret if !BattleModifiers.handles?(:extra_abilities)
-          next AbilityMultiplexer.run_extras(effects.const_get(name), spec, ability, args, ret)
+          next ret if !owner
+          next AbilityMultiplexer.run_extras(effects.const_get(name), name, spec, owner, args, ret)
         end
         wrappers[trigger_method] = effects.method(trigger_method)
       end
@@ -398,14 +508,16 @@ module BattleModifiers
       return battler
     end
 
-    def run_extras(hash, spec, ability, args, ret)
+    def run_extras(hash, name, spec, owner, args, ret)
       mode  = spec[1]
       index = spec[2]
       return ret if mode == :or && ret
       return ret if mode == :first && ret && ret != 0
-      owner = owner_of(spec[0], ability, args)
-      return ret if !owner
-      owner.bmod_clear_shown_ability
+      # OnSwitchIn est aussi déclenché hors des entrées en jeu (Calque, fin du
+      # Gaz Inhibiteur, Paléosynthèse...) : les talents virtuels ne réagissent
+      # qu'aux vraies entrées (argument switch_in), sinon leurs effets d'entrée
+      # (Brise-Moule, Aéroporté...) se répéteraient.
+      return ret if name == :OnSwitchIn && args[2] != true
       extras = owner.bmod_extra_abilities
       return ret if extras.empty?
       extras.each do |extra|
@@ -415,10 +527,11 @@ module BattleModifiers
         case mode
         when :chain
           ret = value if !value.nil?
-        when :or
-          return value if value
-        when :first
-          return value if value && value != 0
+        when :or, :first
+          next if !value || value == 0
+          # L'appelant affiche souvent la bulle après coup (Aquabulle...).
+          owner.bmod_show_ability(extra)
+          return value
         else   # :each
           ret ||= value
         end
@@ -429,3 +542,50 @@ module BattleModifiers
 end
 
 BattleModifiers::AbilityMultiplexer.install
+
+#===============================================================================
+# IA : elle voit les attaques bloquées (:move_fails, effets permanents), les
+# multiplicateurs de dégâts (:damage_multipliers) et les dégâts de fin de tour
+# (:ai_eor_damage) des gimmicks.
+#===============================================================================
+class Battle::AI
+  alias __bmod_pbPredictMoveFailure pbPredictMoveFailure unless method_defined?(:__bmod_pbPredictMoveFailure)
+  def pbPredictMoveFailure
+    return true if __bmod_pbPredictMoveFailure
+    return false if !BattleModifiers.active?
+    move = @move.move
+    return true if BattleModifiers::Locks.move_blocked?(@battle, move, false)
+    return BattleModifiers.any?(:move_fails, @user.battler, move, [], false)
+  end
+end
+
+class Battle::AI::AIMove
+  alias __bmod_rough_damage rough_damage unless method_defined?(:__bmod_rough_damage)
+  def rough_damage
+    ret = __bmod_rough_damage
+    return ret if ret <= 0 || !BattleModifiers.handles?(:damage_multipliers)
+    user   = @ai.user&.battler
+    target = @ai.target&.battler
+    return ret if !user || !target
+    multipliers = {
+      :power_multiplier        => 1.0,
+      :attack_multiplier       => 1.0,
+      :defense_multiplier      => 1.0,
+      :final_damage_multiplier => 1.0
+    }
+    BattleModifiers.trigger(:damage_multipliers, user, target, @move, rough_type, base_power, multipliers)
+    factor = multipliers[:power_multiplier] * multipliers[:attack_multiplier] *
+             multipliers[:final_damage_multiplier] / multipliers[:defense_multiplier]
+    return ret if factor == 1.0
+    return [(ret * factor).round, 1].max
+  end
+end
+
+class Battle::AI::AIBattler
+  alias __bmod_rough_end_of_round_damage rough_end_of_round_damage unless method_defined?(:__bmod_rough_end_of_round_damage)
+  def rough_end_of_round_damage
+    ret = __bmod_rough_end_of_round_damage
+    return ret if !BattleModifiers.handles?(:ai_eor_damage)
+    return BattleModifiers.modify(:ai_eor_damage, ret, battler)
+  end
+end

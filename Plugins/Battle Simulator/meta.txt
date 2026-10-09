@@ -1,5 +1,5 @@
 Name       = Battle Simulator
-Version    = 0.1.0
+Version    = 0.2.0
 Essentials = 21.1
 Optional   = v21.1 Hotfixes,1.0
 Optional   = Generation 9 Pack,3.0
