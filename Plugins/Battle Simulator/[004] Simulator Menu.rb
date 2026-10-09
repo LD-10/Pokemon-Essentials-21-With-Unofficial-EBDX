@@ -10,6 +10,16 @@
 # JumpUp / JumpDown : catégorie précédente / suivante
 #===============================================================================
 module BattleSimulator
+  # Coupe le texte avec "..." s'il dépasse la largeur donnée (police du bitmap).
+  def self.fit_text(bitmap, text, width)
+    return text if bitmap.text_size(text).width <= width
+    ret = text.dup
+    while ret.length > 1 && bitmap.text_size(ret + "...").width > width
+      ret = ret[0...-1]
+    end
+    return ret + "..."
+  end
+
   #=============================================================================
   # Réglages du menu, mémorisés dans SESSION_FILE entre deux lancements.
   #=============================================================================
@@ -164,14 +174,8 @@ module BattleSimulator
       pbDrawShadowText(self.contents, rect.x, rect.y, rect.width, rect.height, text, base, shadow)
     end
 
-    # Coupe le texte avec "..." s'il dépasse la largeur donnée.
     def fit_text(text, width)
-      return text if self.contents.text_size(text).width <= width
-      ret = text.dup
-      while ret.length > 1 && self.contents.text_size(ret + "...").width > width
-        ret = ret[0...-1]
-      end
-      return ret + "..."
+      return BattleSimulator.fit_text(self.contents, text, width)
     end
   end
 
@@ -184,7 +188,7 @@ module BattleSimulator
     INFO_BASE     = Color.new(208, 216, 248)
     INFO_SHADOW   = Color.new(40, 48, 88)
     TOP_HEIGHT    = 44
-    LIST_HEIGHT   = 192   # 5 lignes visibles ; la description garde 4 lignes
+    LIST_HEIGHT   = 160   # 4 lignes visibles ; la description affiche 4 lignes
 
     attr_reader :state
     # Équipes construites avant de fermer le menu (voir try_start).
@@ -340,15 +344,17 @@ module BattleSimulator
       bitmap = @sprites["top"].bitmap
       bitmap.clear
       pbSetSystemFont(bitmap)
-      pbDrawTextPositions(bitmap, [
-        [_INTL("BATTLE SIMULATOR"), 12, 8, :left, TITLE_BASE, TITLE_SHADOW]
-      ])
+      title = _INTL("BATTLE SIMULATOR")
+      pbDrawTextPositions(bitmap, [[title, 12, 8, :left, TITLE_BASE, TITLE_SHADOW]])
+      free_width = Graphics.width - 12 - (12 + bitmap.text_size(title).width + 16)
       pbSetSmallFont(bitmap)
       count = @state.effective_modifiers.length
       line1 = _INTL("{1} | {2} gimmick(s) actif(s)", option_value(:format), count)
       line2 = ""
       line2 = _INTL("Dernier combat : {1}", @state.last_result) if @state.last_result
       line2 = @notice if @notice
+      line1 = BattleSimulator.fit_text(bitmap, line1, free_width)
+      line2 = BattleSimulator.fit_text(bitmap, line2, free_width)
       pbDrawTextPositions(bitmap, [
         [line1, Graphics.width - 12, 4, :right, INFO_BASE, INFO_SHADOW],
         [line2, Graphics.width - 12, 22, :right, INFO_BASE, INFO_SHADOW]
@@ -442,7 +448,8 @@ module BattleSimulator
     def jump_category(dir)
       rows = @sprites["list"].rows
       headers = []
-      rows.each_with_index { |row, i| headers.push(i) if row[:type] == :header }
+      # Un titre ne compte comme catégorie que s'il a des lignes sous lui.
+      rows.each_with_index { |row, i| headers.push(i) if row[:type] == :header && selectable?(i + 1) }
       return if headers.empty?
       index = @sprites["list"].index
       if dir > 0

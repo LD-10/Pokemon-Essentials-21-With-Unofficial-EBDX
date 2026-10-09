@@ -78,10 +78,12 @@ module BattleSimulator
   # [nil, erreurs]. Le menu l'appelle avant de se fermer, pour que les erreurs
   # d'équipe s'affichent par-dessus le menu.
   def prepare_battle(state)
-    teams, = TeamLoader.load_file
+    teams, load_errors = TeamLoader.load_file
     player_team = teams.find { |t| t.name == state.player_team }
     ai_team     = teams.find { |t| t.name == state.ai_team }
     errors = []
+    # Fichier introuvable ou illisible : load_file renvoie [[], [cause]].
+    errors.concat(load_errors) if teams.empty?
     errors.push(_INTL("Équipe du joueur introuvable.")) if !player_team
     errors.push(_INTL("Équipe de l'IA introuvable.")) if !ai_team
     [player_team, ai_team].uniq.compact.each { |team| errors.concat(team.errors) }

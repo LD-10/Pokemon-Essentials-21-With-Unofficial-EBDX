@@ -95,14 +95,24 @@ module BattleSimulator
           break
         end
       end
+      utf8_bom = [0xEF, 0xBB, 0xBF].pack("C*")
+      has_bom = raw.start_with?(utf8_bom)
+      raw = raw[3..-1] if has_bom
       text = raw.dup.force_encoding(Encoding::UTF_8)
-      text = text[1..-1] if text.start_with?([0xFEFF].pack("U"))   # BOM UTF-8
       return text if text.valid_encoding?
-      begin
-        return raw.dup.force_encoding(Encoding::Windows_1252).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
-      rescue StandardError
-        return text.scrub("?")
-      end
+      return text.scrub("?") if has_bom   # Fichier UTF-8 avec quelques octets abîmés
+      # Sans BOM : seules les lignes qui ne sont pas de l'UTF-8 valide sont lues
+      # en Windows-1252 (un fichier UTF-8 où l'on a collé une ligne ANSI garde
+      # ses accents corrects ailleurs).
+      return raw.lines.map { |line|
+        utf8 = line.dup.force_encoding(Encoding::UTF_8)
+        next utf8 if utf8.valid_encoding?
+        begin
+          next line.dup.force_encoding(Encoding::Windows_1252).encode(Encoding::UTF_8, invalid: :replace, undef: :replace)
+        rescue StandardError
+          next utf8.scrub("?")
+        end
+      }.join
     end
 
     def parse(text)
