@@ -39,18 +39,14 @@ module BattleSimulator
             strict:             true,
             tier:               2,
             ignores_cloud_nine: true,
+            cloud_nine_message: _INTL("Mais Ciel Gris n'a aucun effet sur la {1} !", name),
             block_message:      _INTL("Mais la {1} empêche la météo de changer !", name))
         end
         m.on(:on_battle_start) do |battle|
           battle.pbDisplay(_INTL("C'est une {1} ! Elle restera jusqu'à la fin du combat.", name))
         end
-        # Ciel Gris affiche "les effets de la météo disparaissent" : on corrige.
-        m.on(:on_battler_enter) do |battle, battler|
-          next if !active?(weather) || battle.field.weather != weather
-          next if !battler.hasActiveAbility?(:CLOUDNINE)
-          next if battle.allBattlers.any? { |b| b.hasActiveAbility?(:AIRLOCK) }
-          battle.pbDisplay(_INTL("Mais Ciel Gris n'a aucun effet sur la {1} !", name))
-        end
+        # (Le message "Ciel Gris n'a aucun effet" est affiché par la protection
+        # du handler de Ciel Gris, dans "[008] Gimmick Toolkit.rb".)
         # 1/8 des PV max par tour au lieu de 1/16.
         m.on(:eor_weather_damage) do |battle, battler|
           next nil if !active?(weather)

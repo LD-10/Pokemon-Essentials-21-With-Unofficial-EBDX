@@ -53,6 +53,7 @@ module BattleModifiers
     LOCK_THRESHOLD = 100
 
     @hiding = false
+    @hidden = nil
 
     module_function
 
@@ -78,6 +79,7 @@ module BattleModifiers
     # Options :
     #   strict             : voir l'en-tête du fichier
     #   ignores_cloud_nine : Ciel Gris n'annule pas cette météo (Air Lock oui)
+    #   cloud_nine_message : phrase affichée après celle de Ciel Gris
     #   block_message      : phrase affichée quand un talent essaie de changer
     #                        la météo, ou quand une attaque météo échoue
     def lock_weather(battle, weather, **options)
@@ -206,14 +208,41 @@ module BattleModifiers
         saved_terrain = battle.field.terrain
         battle.field.terrain = :None
       end
+      @hidden = saved
       @hiding = true
       begin
         return yield
       ensure
         @hiding = false
+        @hidden = nil
         saved.each { |effects, effect, value| effects[effect] = value }
         battle.field.terrain = saved_terrain if saved_terrain
       end
+    end
+
+    # Pendant hide_protected : remet un instant la vraie valeur d'un effet de
+    # côté caché (ex. Brume permanente contre la baisse d'Esquive d'Anti-Brume).
+    def with_hidden_side_effect(battle, side, effect)
+      entry = nil
+      if @hiding && @hidden
+        effects = battle.sides[side].effects
+        entry = @hidden.find { |e| e[0].equal?(effects) && e[1] == effect }
+      end
+      return yield if !entry || entry[2] == 0
+      entry[0][effect] = entry[2]
+      begin
+        return yield
+      ensure
+        entry[0][effect] = 0
+      end
+    end
+
+    # Terrain strict en place : les attaques qui retirent le terrain n'y
+    # touchent pas.
+    def terrain_unremovable?(battle)
+      return false if !BattleModifiers.active?
+      lock = terrain_lock
+      return !lock.nil? && lock[:strict] && battle.field.terrain == lock[:terrain]
     end
 
     # Remet en place ce qui a été retiré. timing : :enter (entrée en jeu),
@@ -272,18 +301,75 @@ module BattleModifiers
     # Lame de Fond (Screen Cleaner) n'a pas de classe d'attaque : on enveloppe
     # son handler pour qu'elle ne voie pas les protections strictes.
     #===========================================================================
-    def install_screen_cleaner_guard
-      hash = Battle::AbilityEffects::OnSwitchIn
-      original = hash[:SCREENCLEANER]
+    # Remplace le handler hash[key] par un proc qui reçoit l'original en plus.
+    # Sans effet si c'est déjà fait (F12 recrée les handlers d'origine).
+    def install_guard(hash, key, &body)
+      original = hash[key]
       return if !original || original.instance_variable_get(:@bmod_guard)
-      guard = proc do |ability, battler, battle, switch_in|
-        if BattleModifiers.active?
-          next Locks.hide_protected(battle) { original.call(ability, battler, battle, switch_in) }
-        end
-        next original.call(ability, battler, battle, switch_in)
-      end
+      guard = proc { |*args| body.call(original, *args) }
       guard.instance_variable_set(:@bmod_guard, true)
-      hash.add(:SCREENCLEANER, guard)
+      hash.add(key, guard)
+    end
+
+    def install_ability_guards
+      on_switch_in = Battle::AbilityEffects::OnSwitchIn
+      # Lame de Fond n'a pas de classe d'attaque : elle ne doit pas voir les
+      # protections strictes.
+      install_guard(on_switch_in, :SCREENCLEANER) do |original, ability, battler, battle, switch_in|
+        next original.call(ability, battler, battle, switch_in) if !BattleModifiers.active?
+        next Locks.hide_protected(battle) { original.call(ability, battler, battle, switch_in) }
+      end
+      # Moteur à Hadrons (Gen 9 Pack) affiche "turned the ground into Electric
+      # Terrain" même quand un T-Terrain refuse le changement.
+      install_guard(on_switch_in, :HADRONENGINE) do |original, ability, battler, battle, switch_in|
+        if !BattleModifiers.active? || battle.field.terrain == :Electric ||
+           Locks.terrain_change_allowed?(:Electric)
+          next original.call(ability, battler, battle, switch_in)
+        end
+        battle.pbShowAbilitySplash(battler)
+        battle.pbStartTerrain(battler, :Electric)   # Refusé : message + bulle cachée
+      end
+      # Pouls Orichalque : même problème avec le Soleil sous une météo stricte.
+      install_guard(on_switch_in, :ORICHALCUMPULSE) do |original, ability, battler, battle, switch_in|
+        if !BattleModifiers.active? || [:Sun, :HarshSun].include?(battler.effectiveWeather) ||
+           Locks.weather_change_allowed?(:Sun)
+          next original.call(ability, battler, battle, switch_in)
+        end
+        battle.pbStartWeatherAbility(:Sun, battler)   # Refusé : message + bulle cachée
+      end
+      # Ciel Gris annonce "les effets de la météo disparaissent" à chaque
+      # déclenchement (entrée, Échange, Imitation...) : on corrige juste après
+      # quand la météo verrouillée l'ignore.
+      install_guard(on_switch_in, :CLOUDNINE) do |original, ability, battler, battle, switch_in|
+        ret = original.call(ability, battler, battle, switch_in)
+        lock = (BattleModifiers.active?) ? Locks.weather_lock : nil
+        if lock && lock[:ignores_cloud_nine] && lock[:cloud_nine_message] &&
+           battle.field.weather == lock[:weather] &&
+           battle.allBattlers.none? { |b| b.hasActiveAbility?(:AIRLOCK) }
+          battle.pbDisplay(lock[:cloud_nine_message])
+        end
+        next ret
+      end
+    end
+
+    # IA : Lames Ferraille, Pirouette Glace et Anti-Brume comptent comme s'ils
+    # retiraient le terrain. On annule ce calcul quand le terrain est verrouillé.
+    def install_ai_guards
+      [[Battle::AI::Handlers::MoveEffectScore, ["RemoveTerrain", "RemoveTerrainIceSpinner"]],
+       [Battle::AI::Handlers::MoveEffectAgainstTargetScore, ["LowerTargetEvasion1RemoveSideEffects"]]].each do |hash, codes|
+        codes.each do |code|
+          install_guard(hash, code) do |original, score, *rest|
+            ai     = rest[-2]
+            battle = rest[-1]
+            ret = original.call(score, *rest)
+            if ret.is_a?(Numeric) && ret != Battle::AI::MOVE_USELESS_SCORE &&
+               Settings::MECHANICS_GENERATION >= 8 && Locks.terrain_unremovable?(battle)
+              ret += ai.get_score_for_terrain(battle.field.terrain, rest[1])
+            end
+            next ret
+          end
+        end
+      end
     end
   end
 
@@ -314,4 +400,5 @@ module BattleModifiers
   end
 end
 
-BattleModifiers::Locks.install_screen_cleaner_guard
+BattleModifiers::Locks.install_ability_guards
+BattleModifiers::Locks.install_ai_guards

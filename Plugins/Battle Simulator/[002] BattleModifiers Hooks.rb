@@ -34,12 +34,27 @@ class Battle
   alias __bmod_pbOnBattlerEnteringBattle pbOnBattlerEnteringBattle unless method_defined?(:__bmod_pbOnBattlerEnteringBattle)
   def pbOnBattlerEnteringBattle(battler_index, skip_event_reset = false)
     indices = [battler_index].flatten
-    active = BattleModifiers.active?
-    indices.each { |i| @battlers[i]&.bmod_clear_shown_ability } if active
-    ret = __bmod_pbOnBattlerEnteringBattle(battler_index, skip_event_reset)
-    if active
-      entered = indices.map { |i| @battlers[i] }.compact.reject { |b| b.fainted? }
-      entered.sort_by { |b| -b.pbSpeed }.each do |b|
+    return __bmod_pbOnBattlerEnteringBattle(battler_index, skip_event_reset) if !BattleModifiers.active?
+    # Pokémon qui entrent maintenant. Le jeu peut en faire repartir un pendant
+    # l'appel (Sac Éjection, Repli Tactique) : l'appel imbriqué du remplaçant
+    # déclenche déjà ses propres événements d'entrée.
+    entering = indices.map { |i| [i, @battlers[i]&.pokemon] }
+    indices.each do |i|
+      next if !@battlers[i]
+      @battlers[i].bmod_clear_shown_ability
+      @battlers[i].bmod_entry_pending = true
+    end
+    begin
+      ret = __bmod_pbOnBattlerEnteringBattle(battler_index, skip_event_reset)
+    ensure
+      indices.each { |i| @battlers[i]&.bmod_entry_pending = false }
+    end
+    if BattleModifiers.active?
+      entered = entering.map do |i, pkmn|
+        b = @battlers[i]
+        (b && pkmn && b.pokemon.equal?(pkmn) && !b.fainted?) ? b : nil
+      end
+      entered.compact.sort_by { |b| -b.pbSpeed }.each do |b|
         next if b.fainted?
         BattleModifiers.trigger(:on_battler_enter, self, b)
       end
@@ -113,6 +128,18 @@ class Battle
     return __bmod_pbStartTerrain(user, newTerrain, fixedDuration)
   end
 
+  # Météo primale permanente (defaultWeather = :HarshSun...) : sans le plugin
+  # "v21.1 Hotfixes", pbEndPrimordialWeather la retirerait puis la relancerait
+  # (defaultWeather) à l'infini.
+  alias __bmod_pbEndPrimordialWeather pbEndPrimordialWeather unless method_defined?(:__bmod_pbEndPrimordialWeather)
+  def pbEndPrimordialWeather
+    if BattleModifiers.active? && @field.weather == @field.defaultWeather &&
+       BattleModifiers::Locks.weather_lock
+      return
+    end
+    return __bmod_pbEndPrimordialWeather
+  end
+
   # Les effets rendus permanents (BattleModifiers::Locks) ne décomptent pas.
   alias __bmod_pbEORCountDownSideEffect pbEORCountDownSideEffect unless method_defined?(:__bmod_pbEORCountDownSideEffect)
   def pbEORCountDownSideEffect(side, effect, msg)
@@ -160,6 +187,8 @@ end
 class Battle::Battler
   # Talent virtuel reconnu en dernier par hasActiveAbility? (pour la bulle).
   attr_reader :bmod_shown_ability
+  # Vrai pendant une vraie entrée en jeu (talents virtuels OnSwitchIn).
+  attr_accessor :bmod_entry_pending
 
   # Talents virtuels de ce Pokémon, sans son talent actuel. Pendant l'exécution
   # du handler d'un talent virtuel, @ability_id vaut temporairement ce talent et
@@ -249,9 +278,22 @@ class Battle::Battler
   # Signature : (stat, user, move, showFailMsg, ignoreContrary, ignoreMirrorArmor)
   alias __bmod_pbCanLowerStatStage? pbCanLowerStatStage? unless method_defined?(:__bmod_pbCanLowerStatStage?)
   def pbCanLowerStatStage?(*args)
-    ret = __bmod_pbCanLowerStatStage?(*args)
+    # Brume permanente stricte masquée pendant Anti-Brume : elle protège quand
+    # même de la baisse d'Esquive.
+    ret = BattleModifiers::Locks.with_hidden_side_effect(@battle, idxOwnSide, PBEffects::Mist) do
+      __bmod_pbCanLowerStatStage?(*args)
+    end
     return ret if !ret || !BattleModifiers.active?
     return BattleModifiers.allow?(:can_lower_stat, self, args[0], args[1], args[2], args[3] || false)
+  end
+
+  # Les talents à changement de forme (Banc, Mode Transe, Bouclier-Carcan...)
+  # affichent la bulle du vrai talent : oublier un nom de talent virtuel retenu
+  # par un test silencieux (ex. airborne? -> Lévitation pendant les picots).
+  alias __bmod_pbCheckForm pbCheckForm unless method_defined?(:__bmod_pbCheckForm)
+  def pbCheckForm(*args)
+    bmod_clear_shown_ability if BattleModifiers.active?
+    return __bmod_pbCheckForm(*args)
   end
 
   alias __bmod_pbUseMove pbUseMove unless method_defined?(:__bmod_pbUseMove)
@@ -286,7 +328,14 @@ module BattleModifiers
     end
 
     def pbMoveFailed?(user, targets)
-      return true if super
+      # Change Côté décide d'échouer selon les effets présents : il ne doit pas
+      # voir les effets permanents stricts, comme pendant son effet.
+      failed = if is_a?(Battle::Move::SwapSideEffects) && bmod_masks_removal?
+                 BattleModifiers::Locks.hide_protected(@battle) { super(user, targets) }
+               else
+                 super(user, targets)
+               end
+      return true if failed
       return false if !BattleModifiers.active?
       return true if BattleModifiers::Locks.move_blocked?(@battle, self, true)
       return BattleModifiers.any?(:move_fails, user, self, targets, true)
@@ -310,9 +359,35 @@ module BattleModifiers
     end
 
     def pbCalcDamageMultipliers(user, target, numTargets, type, baseDmg, multipliers)
-      ret = super
+      @bmod_strict_screen = bmod_strict_screen_against?(target)
+      begin
+        ret = super
+      ensure
+        @bmod_strict_screen = false
+      end
       BattleModifiers.trigger(:damage_multipliers, user, target, self, type, baseDmg, multipliers)
       return ret
+    end
+
+    # Casse-Brique, Psycho-Croc, Rage Taurine ignorent les écrans parce qu'ils
+    # les brisent. Un écran permanent strict n'est pas brisé : il réduit aussi
+    # ce coup.
+    def ignoresReflect?
+      return false if @bmod_strict_screen
+      return super
+    end
+
+    def bmod_strict_screen_against?(target)
+      return false if !BattleModifiers.active? || !is_a?(Battle::Move::RemoveScreens)
+      locks = BattleModifiers::Locks.state[:side_locks]
+      return false if !locks
+      side    = target.idxOwnSide
+      effects = target.pbOwnSide.effects
+      strict  = lambda { |e| locks[[side, e]] == true && effects[e] > 0 }
+      return true if strict.call(PBEffects::AuroraVeil)
+      return true if physicalMove? && strict.call(PBEffects::Reflect)
+      return true if specialMove? && strict.call(PBEffects::LightScreen)
+      return false
     end
 
     def pbCalcAccuracyModifiers(user, target, modifiers)
@@ -483,8 +558,10 @@ module BattleModifiers
           next effects.send(original, ability, *args) if !BattleModifiers.extra_abilities?
           # Porteur cherché avant l'appel (le handler peut changer le talent), et
           # nom de bulle oublié pour qu'il ne s'affiche pas sur le vrai talent.
+          # Idem pour les Pokémon passés au handler (ex. l'attaquant pour Momie).
           owner = AbilityMultiplexer.owner_of(spec[0], ability, args)
           owner&.bmod_clear_shown_ability
+          args.each { |a| a.bmod_clear_shown_ability if a.is_a?(Battle::Battler) }
           ret = effects.send(original, ability, *args)
           next ret if !owner
           next AbilityMultiplexer.run_extras(effects.const_get(name), name, spec, owner, args, ret)
@@ -517,7 +594,12 @@ module BattleModifiers
       # Gaz Inhibiteur, Paléosynthèse...) : les talents virtuels ne réagissent
       # qu'aux vraies entrées (argument switch_in), sinon leurs effets d'entrée
       # (Brise-Moule, Aéroporté...) se répéteraient.
-      return ret if name == :OnSwitchIn && args[2] != true
+      # Une seule fois par entrée : Paléosynthèse/Moteur à Quarks rappellent
+      # OnSwitchIn avec switch_in = true (Morphing, Imposteur...).
+      if name == :OnSwitchIn
+        return ret if args[2] != true || !owner.bmod_entry_pending
+        owner.bmod_entry_pending = false
+      end
       extras = owner.bmod_extra_abilities
       return ret if extras.empty?
       extras.each do |extra|
@@ -564,6 +646,9 @@ class Battle::AI::AIMove
   def rough_damage
     ret = __bmod_rough_damage
     return ret if ret <= 0 || !BattleModifiers.handles?(:damage_multipliers)
+    # Dégâts fixes (Frappe Atlas, Croc Fatal, K.O. en un coup...) : pas de
+    # multiplicateurs en combat non plus.
+    return ret if @move.is_a?(Battle::Move::FixedDamageMove)
     user   = @ai.user&.battler
     target = @ai.target&.battler
     return ret if !user || !target
@@ -577,7 +662,10 @@ class Battle::AI::AIMove
     factor = multipliers[:power_multiplier] * multipliers[:attack_multiplier] *
              multipliers[:final_damage_multiplier] / multipliers[:defense_multiplier]
     return ret if factor == 1.0
-    return [(ret * factor).round, 1].max
+    ret = [(ret * factor).round, 1].max
+    # Faux-Chage / Retenue ne mettent jamais K.O.
+    ret = target.hp - 1 if @move.nonLethal?(user, target) && ret >= target.hp
+    return ret
   end
 end
 

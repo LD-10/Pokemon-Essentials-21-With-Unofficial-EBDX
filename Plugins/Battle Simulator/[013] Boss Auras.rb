@@ -81,7 +81,7 @@ module BattleSimulator
       [:aura_sturdy,        :STURDY,       _INTL("Fermeté"),         :aura_protect,
        _INTL("Survit avec 1 PV à un coup fatal s'il a tous ses PV ; immunité aux attaques K.O. en un coup.")],
       [:aura_disguise,      :DISGUISE,     _INTL("Fantômasque"),     :aura_protect,
-       _INTL("Le 1er coup reçu par chaque Pokémon est absorbé (il perd 1/8 de ses PV).")],
+       _INTL("Le 1er coup reçu par chaque Pokémon est absorbé (il perd ensuite 1/8 de ses PV, sauf Garde Magik).")],
       [:aura_pastel_veil,   :PASTELVEIL,   _INTL("Voile Pastel"),    :aura_protect,
        _INTL("Le Pokémon et son partenaire ne peuvent pas être empoisonnés.")],
       [:aura_overcoat,      :OVERCOAT,     _INTL("Envelocape"),      :aura_protect,
@@ -138,10 +138,12 @@ module BattleSimulator
     # Ce coup peut-il être absorbé par une aura Fantômasque / Tête de Gel ?
     # (même conditions que le jeu : pas Brise Moule, pas Clone, et le vrai
     # talent de Mimiqui/Bekaglaçon garde son propre code)
-    def can_absorb?(battle, target, real_ability)
+    def can_absorb?(battle, target, real_ability, user)
       return false if !BattleModifiers.ai_battler?(target)
       return false if target.ability_id == real_ability
-      return false if battle.moldBreaker
+      # Dégâts de confusion (user == target) : le Brise Moule d'une autre
+      # attaque (battle.moldBreaker peut rester vrai après un échec) ne compte pas.
+      return false if battle.moldBreaker && !(user && user.index == target.index)
       ds = target.damageState
       return false if ds.substitute || ds.disguise || ds.iceFace
       return true
@@ -161,7 +163,7 @@ module BattleSimulator
       set_broken(:aura_ice_face_broken, battler, false)
       (BattleModifiers.state[:aura_ice_face_restore] ||= {}).delete(pokemon_key(battler))
       show_splash(battle, battler, :ICEFACE,
-                  _INTL("La Tête de Gel de {1} s'est reformée !", battler.pbThis(true)))
+                  _INTL("{1}'s Ice Face was restored!", battler.pbThis))
     end
   end
 end
@@ -185,12 +187,31 @@ BattleSimulator::BossAuras::LIST.each_with_index do |entry, i|
 end
 
 #-------------------------------------------------------------------------------
+# Toison Herbue : le handler du jeu (DamageCalcFromTarget) renforce aussi
+# contre les attaques spéciales. En simulateur : Défense seulement (attaques
+# physiques + Choc Psy), comme dans les jeux et Showdown.
+#-------------------------------------------------------------------------------
+BattleModifiers::Locks.install_guard(Battle::AbilityEffects::DamageCalcFromTarget, :GRASSPELT) do |original, ability, user, target, move, mults, power, type|
+  if BattleModifiers.active? && !move.physicalMove?(type) &&
+     move.function_code != "UseTargetDefenseInsteadOfTargetSpDef"
+    next
+  end
+  next original.call(ability, user, target, move, mults, power, type)
+end
+
+#-------------------------------------------------------------------------------
 # Gaz Inhibiteur : seuls les talents du joueur sont neutralisés. (Un vrai Gaz
 # Inhibiteur donné en talent virtuel neutraliserait aussi l'IA et ses auras.)
 #-------------------------------------------------------------------------------
 BattleModifiers.get(:aura_neutralizing_gas).tap do |m|
   m.on(:ability_active) do |battler, check_ability|
-    next true if BattleModifiers.ai_battler?(battler)
+    if BattleModifiers.ai_battler?(battler)
+      # L'aura remplace un vrai Gaz Inhibiteur de l'IA, qui neutraliserait
+      # aussi son partenaire et ses auras.
+      next false if check_ability == :NEUTRALIZINGGAS ||
+                    (check_ability.is_a?(Array) && check_ability.include?(:NEUTRALIZINGGAS))
+      next true
+    end
     # Talents qu'aucun Gaz Inhibiteur ne neutralise (Déguisement...), et
     # Bouclier Talent. Ces deux tests n'appellent pas abilityActive?.
     next true if battler.unstoppableAbility?
@@ -205,6 +226,31 @@ BattleModifiers.get(:aura_neutralizing_gas).tap do |m|
   end
 end
 
+# Message d'envoi (pbMessagesOnReplace) : il teste Illusion avec
+# pbCheckGlobalAbility(:NEUTRALIZINGGAS), qui ne voit pas l'aura. Pendant ce
+# message seulement, l'aura compte comme un vrai Gaz Inhibiteur pour le joueur.
+class Battle
+  alias __bsim_ng_pbMessagesOnReplace pbMessagesOnReplace unless method_defined?(:__bsim_ng_pbMessagesOnReplace)
+  def pbMessagesOnReplace(idxBattler, idxParty)
+    pkmn = pbParty(idxBattler)[idxParty]
+    @bsim_aura_gas = BattleModifiers.active? && BattleModifiers.enabled?(:aura_neutralizing_gas) &&
+                     !opposes?(idxBattler) && pkmn && !pkmn.hasItem?(:ABILITYSHIELD)
+    begin
+      return __bsim_ng_pbMessagesOnReplace(idxBattler, idxParty)
+    ensure
+      @bsim_aura_gas = false
+    end
+  end
+
+  alias __bsim_ng_pbCheckGlobalAbility pbCheckGlobalAbility unless method_defined?(:__bsim_ng_pbCheckGlobalAbility)
+  def pbCheckGlobalAbility(*args)
+    if @bsim_aura_gas && args[0] == :NEUTRALIZINGGAS
+      return BattleModifiers::Tools.ai_battlers(self).first || true
+    end
+    return __bsim_ng_pbCheckGlobalAbility(*args)
+  end
+end
+
 #-------------------------------------------------------------------------------
 # Fantômasque : le 1er coup reçu par chaque Pokémon de l'IA ne fait aucun
 # dégât (Clone et Brise Moule passent outre), puis le Pokémon perd 1/8 de ses
@@ -213,7 +259,7 @@ end
 BattleModifiers.get(:aura_disguise).tap do |m|
   m.on(:damage_absorption) do |user, target, move|
     battle = target.battle
-    next if !BattleSimulator::BossAuras.can_absorb?(battle, target, :DISGUISE)
+    next if !BattleSimulator::BossAuras.can_absorb?(battle, target, :DISGUISE, user)
     next if BattleSimulator::BossAuras.broken?(:aura_disguise_broken, target)
     target.damageState.disguise = true
     BattleSimulator::BossAuras.set_broken(:aura_disguise_broken, target, true)
@@ -226,7 +272,11 @@ BattleModifiers.get(:aura_disguise).tap do |m|
     BattleSimulator::BossAuras.show_splash(battle, target, :DISGUISE,
                                            _INTL("Its disguise served it as a decoy!"))
     battle.pbDisplay(_INTL("{1}'s disguise was busted!", target.pbThis))
-    target.pbReduceHP(target.totalhp / 8, false) if Settings::MECHANICS_GENERATION >= 8
+    # Garde Magik (vrai talent ou aura) bloque ces dégâts, comme dans Showdown.
+    if Settings::MECHANICS_GENERATION >= 8 && target.takesIndirectDamage?
+      target.pbReduceHP(target.totalhp / 8, false)
+    end
+    target.bmod_clear_shown_ability   # Garde Magik virtuelle testée sans bulle
     next true
   end
 end
@@ -240,7 +290,7 @@ BattleModifiers.get(:aura_ice_face).tap do |m|
   m.on(:damage_absorption) do |user, target, move|
     battle = target.battle
     next if !move.physicalMove?
-    next if !BattleSimulator::BossAuras.can_absorb?(battle, target, :ICEFACE)
+    next if !BattleSimulator::BossAuras.can_absorb?(battle, target, :ICEFACE, user)
     next if BattleSimulator::BossAuras.broken?(:aura_ice_face_broken, target)
     target.damageState.iceFace = true
     BattleSimulator::BossAuras.set_broken(:aura_ice_face_broken, target, true)
@@ -250,16 +300,20 @@ BattleModifiers.get(:aura_ice_face).tap do |m|
     hits = BattleModifiers.state[:aura_ice_face_hits]
     next nil if !hits || !hits.delete(target.index) || !target.damageState.iceFace
     BattleSimulator::BossAuras.show_splash(target.battle, target, :ICEFACE,
-      _INTL("La Tête de Gel de {1} a encaissé le coup et s'est brisée !", target.pbThis(true)))
+      _INTL("{1}'s Ice Face took the hit and broke!", target.pbThis))
     next true
   end
-  # La grêle commence : les Têtes de Gel brisées pourront se reformer en fin
-  # de tour (comme Bekaglaçon).
+  # La grêle commence (et touche ce Pokémon) : sa Tête de Gel brisée se
+  # reformera en fin de tour, comme le canRestoreIceFace de Bekaglaçon. Les
+  # Pokémon au banc sont gérés par on_battler_enter.
   m.on(:on_weather_change) do |battle, old_weather, new_weather|
     next if new_weather != :Hail
-    broken = BattleModifiers.state[:aura_ice_face_broken] || {}
+    broken  = BattleModifiers.state[:aura_ice_face_broken] || {}
     restore = (BattleModifiers.state[:aura_ice_face_restore] ||= {})
-    broken.each { |key, value| restore[key] = true if value }
+    BattleModifiers::Tools.ai_battlers(battle).each do |b|
+      key = BattleSimulator::BossAuras.pokemon_key(b)
+      restore[key] = true if broken[key] && b.effectiveWeather == :Hail
+    end
   end
   m.on(:on_end_of_round) do |battle|
     restore = BattleModifiers.state[:aura_ice_face_restore]
@@ -269,6 +323,7 @@ BattleModifiers.get(:aura_ice_face).tap do |m|
       next if b.effectiveWeather != :Hail
       BattleSimulator::BossAuras.restore_ice_face(battle, b)
     end
+    restore.clear   # Valable pour ce tour seulement
   end
   m.on(:on_battler_enter) do |battle, battler|
     next if !BattleModifiers.ai_battler?(battler) || battler.effectiveWeather != :Hail

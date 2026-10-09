@@ -10,13 +10,26 @@
 #
 # Salles et Gravité : verrouillées, utiliser la même attaque échoue.
 #
-# Protections côté IA : présentes dès le tour 1 et sans fin. Casse-Brique,
-# Anti-Brume, Lame de Fond, Change Côté... peuvent les retirer : elles se
-# reforment à la fin du tour (ou jamais retirées si
-# CLASSIC_EFFECTS_REMOVABLE = false).
+# Les météos primales (Terre Finale, Mer Primaire, Souffle Delta) ne peuvent
+# être remplacées que par une autre météo primale, tant que son porteur reste.
+#
+# Protections côté IA : présentes dès le tour 1 et sans fin. Selon l'effet,
+# Casse-Brique, Anti-Brume, Lame de Fond ou Change Côté peuvent les retirer
+# (rien ne retire Air Veinard) : elles se reforment à la fin du tour (ou
+# jamais retirées si CLASSIC_EFFECTS_REMOVABLE = false).
 #===============================================================================
 module BattleSimulator
   module ClassicEffects
+    # Ce qui retire vraiment chaque effet de côté dans Essentials.
+    SIDE_REMOVERS = {
+      PBEffects::Reflect     => _INTL("Casse-Brique, Anti-Brume, Change Côté..."),
+      PBEffects::LightScreen => _INTL("Casse-Brique, Anti-Brume, Change Côté..."),
+      PBEffects::AuroraVeil  => _INTL("Casse-Brique, Anti-Brume, Change Côté..."),
+      PBEffects::Safeguard   => _INTL("Anti-Brume, Change Côté"),
+      PBEffects::Mist        => _INTL("Anti-Brume, Change Côté"),
+      PBEffects::Tailwind    => _INTL("Change Côté")
+    }
+
     module_function
 
     def strict?
@@ -24,8 +37,12 @@ module BattleSimulator
     end
 
     # Phrase ajoutée aux descriptions selon le réglage.
-    def weather_rule
+    def weather_rule(weather)
       return _INTL("Ne peut pas être remplacée (sauf par une météo primale).") if strict?
+      # Météo primale : le jeu bloque déjà les attaques et talents météo.
+      if BattleModifiers::Locks::PRIMAL_WEATHERS.include?(weather)
+        return _INTL("Seule une autre météo primale la remplace (tant que son porteur reste), puis elle revient.")
+      end
       return _INTL("Une autre météo peut la remplacer 5 tours, puis elle revient.")
     end
 
@@ -34,15 +51,17 @@ module BattleSimulator
       return _INTL("Remplaçable 5 tours ; retiré (Anti-Brume...), il revient en fin de tour.")
     end
 
-    def side_rule
+    def side_rule(effect)
       return _INTL("Ne peut pas être retiré.") if strict?
-      return _INTL("Retiré (Casse-Brique, Anti-Brume...), il revient en fin de tour.")
+      removers = SIDE_REMOVERS[effect]
+      return _INTL("Aucune attaque ne peut le retirer.") if !removers
+      return _INTL("Retiré ({1}), il revient en fin de tour.", removers)
     end
 
     def register_weather(id, name, weather, text, order)
       BattleModifiers.register(id,
         name:        name,
-        description: text + " " + weather_rule,
+        description: text + " " + weather_rule(weather),
         category:    :weather,
         scope:       :global,
         exclusive:   :weather,
@@ -91,7 +110,7 @@ module BattleSimulator
     def register_side(id, name, effect, text, announce, order)
       BattleModifiers.register(id,
         name:        name,
-        description: text + " " + side_rule,
+        description: text + " " + side_rule(effect),
         category:    :ai_side,
         scope:       :ai_side,
         order:       order

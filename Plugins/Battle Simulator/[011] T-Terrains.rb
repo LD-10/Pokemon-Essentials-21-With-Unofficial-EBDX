@@ -125,3 +125,16 @@ BattleSimulator::TTerrains.register(:t_misty,
     next Effectiveness::INEFFECTIVE_MULTIPLIER
   end
 end
+
+# IA : son calcul d'efficacité (estimation des dégâts, décisions de switch...)
+# doit aussi voir l'immunité aux attaques Dragon.
+class Battle::AI::AIBattler
+  alias __tmisty_effectiveness_of_type_against_battler effectiveness_of_type_against_battler unless method_defined?(:__tmisty_effectiveness_of_type_against_battler)
+  def effectiveness_of_type_against_battler(type, user = nil, move = nil)
+    ret = __tmisty_effectiveness_of_type_against_battler(type, user, move)
+    return ret if type != :DRAGON || !BattleModifiers.enabled?(:t_misty) || !BattleModifiers.active?
+    return ret if move && !move.damagingMove?
+    return ret if !BattleSimulator::TTerrains.active?(battler.battle, :Misty)
+    return Effectiveness::INEFFECTIVE_MULTIPLIER
+  end
+end

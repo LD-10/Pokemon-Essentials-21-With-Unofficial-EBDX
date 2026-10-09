@@ -387,7 +387,7 @@ module BattleSimulator
       when :action
         mods = @state.effective_modifiers.map { |m| m.name }
         text = _INTL("{1} contre {2}.", option_value(:player_team), option_value(:ai_team))
-        text += "\n" + ((mods.empty?) ? _INTL("Aucun gimmick.") : _INTL("Gimmicks : {1}", mods.join(", ")))
+        text += "\n" + ((mods.empty?) ? _INTL("Aucun gimmick.") : _INTL("{1} gimmick(s) : {2}", mods.length, mods.join(", ")))
         return text
       when :command
         case row[:key]
